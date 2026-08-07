@@ -366,19 +366,35 @@
       }
 
       function requestManualInput() {
-        // 通知盤點頁立刻切手動輸入（不依賴關閉後輪詢寬限）
-        var payload = { type: "manual-barcode-input", __upcManual: true };
+        if (done) return;
+        done = true;
+        looping = false;
+        stopCamera();
+        hint("正在切換手動輸入…", "ok");
+
+        // 主力：與掃到條碼相同，走 GAS token callback（跨域可靠；盤點頁輪詢 cancelled）
+        if (scanToken && callbackUrl && isSafeCallback(callbackUrl)) {
+          var dest = callbackUrl +
+            (callbackUrl.indexOf("?") >= 0 ? "&" : "?") +
+            "action=scanCancel" +
+            "&token=" + encodeURIComponent(scanToken);
+          location.href = dest;
+          return;
+        }
+
+        // 備援：只 postMessage，不可讀取 opener 自訂屬性（跨域會丟 SecurityError 導致整段失敗）
         try {
-          if (window.opener && !window.opener.closed) {
-            if (typeof window.opener.requestManualBarcodeInput === "function") {
-              window.opener.requestManualBarcodeInput();
-            }
-            window.opener.postMessage(payload, "*");
-            try { window.opener.focus(); } catch (e0) {}
+          if (window.opener) {
+            window.opener.postMessage(
+              { type: "manual-barcode-input", __upcManual: true },
+              "*"
+            );
           }
         } catch (e) {}
-        stopCamera();
-        hint("請返回盤點畫面手動輸入條碼…", "ok");
+        try {
+          if (window.opener) window.opener.focus();
+        } catch (e0) {}
+        hint("請切回盤點分頁手動輸入條碼", "ok");
         setTimeout(function () {
           try { window.close(); } catch (e2) {}
         }, 200);
