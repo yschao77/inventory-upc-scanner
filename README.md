@@ -12,14 +12,13 @@ Google Apps Script 網頁跑在沙箱 iframe 內，**不能直接使用相機**�
 - ZBar WASM（`@undecaf/barcode-detector-polyfill`）
 - 只辨識：`upc_a` / `upc_e` / `ean_8` / `ean_13`
 - 橫向掃描框 + 後鏡頭 +（支援時）輕微 zoom
-- 掃到後 `postMessage` 回傳給 opener
+- 掃到後導向 GAS callback：`?action=scanResult&token=...&code=...`
+- 盤點頁以 token 輪詢 `pollScanResult`，不依賴 `window.opener` / `postMessage`
 
 ## 網址（GitHub Pages）
 
-啟用 Pages 後：
-
 ```
-https://yschao77.github.io/inventory-upc-scanner/?post=opener
+https://yschao77.github.io/inventory-upc-scanner/?token=TOKEN&callback=GAS_WEBAPP_URL
 ```
 
 ## 本機測試

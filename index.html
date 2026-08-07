@@ -143,6 +143,9 @@
       var torchOn = false;
       var lastCode = "";
       var lastAt = 0;
+      var params = new URLSearchParams(location.search || "");
+      var scanToken = String(params.get("token") || "").replace(/[^a-fA-F0-9]/g, "");
+      var callbackUrl = String(params.get("callback") || "");
 
       function hint(text, kind) {
         hintEl.className = kind || "";
@@ -153,31 +156,44 @@
         return String(value || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
       }
 
-      function postResult(code) {
+      function isSafeCallback(url) {
+        return /^https:\/\/script\.google\.com\//i.test(url) ||
+          /^https:\/\/script\.googleusercontent\.com\//i.test(url);
+      }
+
+      function deliverResult(code) {
+        // 主力：導向 GAS callback，由 CacheService 暫存，盤點頁輪詢取得。
+        if (scanToken && callbackUrl && isSafeCallback(callbackUrl)) {
+          var dest = callbackUrl +
+            (callbackUrl.indexOf("?") >= 0 ? "&" : "?") +
+            "action=scanResult" +
+            "&token=" + encodeURIComponent(scanToken) +
+            "&code=" + encodeURIComponent(code);
+          hint("已掃到 " + code + "，正在回傳盤點系統…", "ok");
+          stopCamera();
+          location.href = dest;
+          return;
+        }
+        // 備援：舊的 opener postMessage（可能被 Safari 切斷）
         var payload = {
           type: "barcode-scanned",
           value: code,
           text: code,
           __upcScan: code
         };
-        function sendOnce() {
-          try {
-            if (window.opener) {
-              if (typeof window.opener.onExternalScanResult === "function") {
-                window.opener.onExternalScanResult(code);
-              }
-              window.opener.postMessage(payload, "*");
+        try {
+          if (window.opener) {
+            if (typeof window.opener.onExternalScanResult === "function") {
+              window.opener.onExternalScanResult(code);
             }
-          } catch (e) {}
-          try {
-            if (window.parent && window.parent !== window) {
-              window.parent.postMessage(payload, "*");
-            }
-          } catch (e2) {}
-        }
-        // 連送兩次，避免 GAS 跨網域時偶發漏收
-        sendOnce();
-        setTimeout(sendOnce, 120);
+            window.opener.postMessage(payload, "*");
+          }
+        } catch (e) {}
+        hint("已掃到 " + code + "，返回盤點畫面…", "ok");
+        stopCamera();
+        setTimeout(function () {
+          try { window.close(); } catch (e2) {}
+        }, 700);
       }
 
       function beep() {
@@ -231,13 +247,7 @@
           try { navigator.vibrate(40); } catch (e) {}
         }
         beep();
-        hint("已掃到 " + code + "，返回盤點畫面…", "ok");
-        postResult(code);
-        stopCamera();
-        // 稍晚關閉，讓 opener 有時間收到 postMessage
-        setTimeout(function () {
-          try { window.close(); } catch (e) {}
-        }, 700);
+        deliverResult(code);
       }
 
       async function detectLoop() {
