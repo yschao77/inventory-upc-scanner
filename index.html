@@ -238,21 +238,15 @@
         } catch (e) {}
       }
 
-      function focusOpener() {
-        try {
-          if (window.opener) window.opener.focus();
-        } catch (e) {}
-      }
-
       function showStay(title, text) {
         document.getElementById("stayTitle").textContent = title;
         document.getElementById("stayText").textContent = text;
         document.getElementById("stay").className = "show";
       }
 
-      // 先嘗試把焦點交回盤點頁再關閉；若 iOS 擋關閉，才顯示「請切回」備援。
+      // 不要先 opener.focus()：iOS 會先切回 GAS 分頁，HtmlService iframe 常因此重載成首頁。
+      // 關閉成功時瀏覽器會自然回到 opener；關不掉才顯示備援提示。
       function closeSelfOrNotify(title, text) {
-        focusOpener();
         setTimeout(function () {
           try { window.close(); } catch (e) {}
         }, 120);
@@ -264,17 +258,36 @@
       function deliverResult(code) {
         stopCamera();
         hint("已掃到 " + code + "，正在回傳盤點系統…", "ok");
-        var wait = hasCallback()
-          ? sendToCallback("scanResult", "code", code)
-          : Promise.resolve();
+        // 優先 postMessage（父頁可立刻查詢）；HTTP callback 僅作 opener 失效時的備援。
+        // 有 opener 時不要打同一 GAS /exec，避免盤點 iframe 被連帶重載。
+        postToOpener({
+          type: "barcode-scanned",
+          value: code,
+          text: code,
+          __upcScan: code
+        });
+        var wait = Promise.resolve();
+        if (hasCallback() && !window.opener) {
+          wait = sendToCallback("scanResult", "code", code);
+        } else if (hasCallback()) {
+          // 有 opener 仍背景送一份，但用 keepalive 且不阻塞關閉；父頁已靠 postMessage
+          try {
+            var url = callbackUrl +
+              (callbackUrl.indexOf("?") >= 0 ? "&" : "?") +
+              "action=scanResult&token=" + encodeURIComponent(scanToken) +
+              "&code=" + encodeURIComponent(code) +
+              "&t=" + Date.now();
+            if (window.fetch) {
+              fetch(url, {
+                mode: "no-cors",
+                cache: "no-store",
+                credentials: "omit",
+                keepalive: true
+              }).catch(function () {});
+            }
+          } catch (e) {}
+        }
         wait.then(function () {
-          // 必須等 callback 寫入後再通知／關窗，避免請求被中斷
-          postToOpener({
-            type: "barcode-scanned",
-            value: code,
-            text: code,
-            __upcScan: code
-          });
           closeSelfOrNotify(
             "✓ 已掃到 " + code,
             "已回傳盤點系統。請切回盤點分頁，系統會自動查詢。"
@@ -457,17 +470,13 @@
         looping = false;
         stopCamera();
         hint("正在切換手動輸入…", "ok");
-        var wait = hasCallback()
-          ? sendToCallback("scanCancel")
-          : Promise.resolve();
-        wait.then(function () {
-          // 等 cancelled 寫入後再通知盤點頁，避免父頁提早關窗中斷請求
-          postToOpener({ type: "manual-barcode-input", __upcManual: true });
-          closeSelfOrNotify(
-            "✓ 已切換手動輸入",
-            "請切回盤點分頁，直接輸入條碼後按查詢。"
-          );
-        });
+        // 手動輸入只靠 postMessage：不要 fetch 同一 GAS /exec（會讓盤點 iframe 重載回首頁），
+        // 也不要 opener.focus()（iOS 會先切分頁觸發重載）。
+        postToOpener({ type: "manual-barcode-input", __upcManual: true });
+        closeSelfOrNotify(
+          "✓ 已切換手動輸入",
+          "請切回盤點分頁，直接輸入條碼後按查詢。"
+        );
       }
 
       document.getElementById("retry").onclick = function () {
