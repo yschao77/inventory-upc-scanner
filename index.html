@@ -110,6 +110,32 @@
       font-size: .9rem;
       font-weight: 600;
     }
+    #stay {
+      position: absolute;
+      inset: 0;
+      z-index: 20;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      padding: 24px;
+      background: #000;
+      text-align: center;
+    }
+    #stay.show { display: flex; }
+    #stayTitle {
+      font-size: 1.5rem;
+      font-weight: 900;
+      color: #20c997;
+      line-height: 1.35;
+    }
+    #stayText {
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #dee2e6;
+      line-height: 1.5;
+    }
   </style>
 </head>
 <body>
@@ -123,6 +149,10 @@
       <button type="button" id="torch">手電筒</button>
       <button type="button" id="retry">重新開啟相機</button>
       <button type="button" id="closeBtn">手動輸入條碼</button>
+    </div>
+    <div id="stay">
+      <div id="stayTitle"></div>
+      <div id="stayText"></div>
     </div>
   </div>
 
@@ -161,39 +191,78 @@
           /^https:\/\/script\.googleusercontent\.com\//i.test(url);
       }
 
+      function hasCallback() {
+        return !!(scanToken && callbackUrl && isSafeCallback(callbackUrl));
+      }
+
+      // 背景送出，不做頁面導向：導到 Google 網域後 opener 會被切斷，
+      // 這個分頁就再也關不掉（使用者會卡在中繼頁）。
+      function sendToCallback(action, extraKey, extraValue) {
+        var url = callbackUrl +
+          (callbackUrl.indexOf("?") >= 0 ? "&" : "?") +
+          "action=" + encodeURIComponent(action) +
+          "&token=" + encodeURIComponent(scanToken);
+        if (extraKey) url += "&" + extraKey + "=" + encodeURIComponent(extraValue);
+        url += "&t=" + Date.now();
+        try {
+          if (window.fetch) {
+            fetch(url, {
+              mode: "no-cors",
+              cache: "no-store",
+              credentials: "omit",
+              keepalive: true
+            }).catch(function () {});
+          }
+        } catch (e) {}
+        // 影像請求作為備援：同一 token 重複寫入結果相同
+        try {
+          var img = new Image();
+          img.referrerPolicy = "no-referrer";
+          img.src = url + "&r=img";
+        } catch (e2) {}
+      }
+
+      function postToOpener(payload) {
+        // 跨網域只能 postMessage，讀取 opener 自訂屬性會丟 SecurityError
+        try {
+          if (window.opener) window.opener.postMessage(payload, "*");
+        } catch (e) {}
+        try {
+          if (window.opener) window.opener.focus();
+        } catch (e2) {}
+      }
+
+      function showStay(title, text) {
+        document.getElementById("stayTitle").textContent = title;
+        document.getElementById("stayText").textContent = text;
+        document.getElementById("stay").className = "show";
+      }
+
+      // 送出後自我關閉；iOS 有時不允許關閉，此時整頁顯示提示，
+      // 盤點分頁已由輪詢處理完畢，使用者切回去即可繼續。
+      function closeSelfOrNotify(title, text) {
+        setTimeout(function () {
+          try { window.close(); } catch (e) {}
+        }, 250);
+        setTimeout(function () {
+          showStay(title, text);
+        }, 900);
+      }
+
       function deliverResult(code) {
-        // 主力：導向 GAS callback，由 CacheService 暫存，盤點頁輪詢取得。
-        if (scanToken && callbackUrl && isSafeCallback(callbackUrl)) {
-          var dest = callbackUrl +
-            (callbackUrl.indexOf("?") >= 0 ? "&" : "?") +
-            "action=scanResult" +
-            "&token=" + encodeURIComponent(scanToken) +
-            "&code=" + encodeURIComponent(code);
-          hint("已掃到 " + code + "，正在回傳盤點系統…", "ok");
-          stopCamera();
-          location.href = dest;
-          return;
-        }
-        // 備援：舊的 opener postMessage（可能被 Safari 切斷）
-        var payload = {
+        stopCamera();
+        hint("已掃到 " + code + "，正在回傳盤點系統…", "ok");
+        if (hasCallback()) sendToCallback("scanResult", "code", code);
+        postToOpener({
           type: "barcode-scanned",
           value: code,
           text: code,
           __upcScan: code
-        };
-        try {
-          if (window.opener) {
-            if (typeof window.opener.onExternalScanResult === "function") {
-              window.opener.onExternalScanResult(code);
-            }
-            window.opener.postMessage(payload, "*");
-          }
-        } catch (e) {}
-        hint("已掃到 " + code + "，返回盤點畫面…", "ok");
-        stopCamera();
-        setTimeout(function () {
-          try { window.close(); } catch (e2) {}
-        }, 700);
+        });
+        closeSelfOrNotify(
+          "✓ 已掃到 " + code,
+          "已回傳盤點系統。請切回盤點分頁，系統會自動查詢。"
+        );
       }
 
       function beep() {
@@ -371,33 +440,12 @@
         looping = false;
         stopCamera();
         hint("正在切換手動輸入…", "ok");
-
-        // 主力：與掃到條碼相同，走 GAS token callback（跨域可靠；盤點頁輪詢 cancelled）
-        if (scanToken && callbackUrl && isSafeCallback(callbackUrl)) {
-          var dest = callbackUrl +
-            (callbackUrl.indexOf("?") >= 0 ? "&" : "?") +
-            "action=scanCancel" +
-            "&token=" + encodeURIComponent(scanToken);
-          location.href = dest;
-          return;
-        }
-
-        // 備援：只 postMessage，不可讀取 opener 自訂屬性（跨域會丟 SecurityError 導致整段失敗）
-        try {
-          if (window.opener) {
-            window.opener.postMessage(
-              { type: "manual-barcode-input", __upcManual: true },
-              "*"
-            );
-          }
-        } catch (e) {}
-        try {
-          if (window.opener) window.opener.focus();
-        } catch (e0) {}
-        hint("請切回盤點分頁手動輸入條碼", "ok");
-        setTimeout(function () {
-          try { window.close(); } catch (e2) {}
-        }, 200);
+        if (hasCallback()) sendToCallback("scanCancel");
+        postToOpener({ type: "manual-barcode-input", __upcManual: true });
+        closeSelfOrNotify(
+          "✓ 已切換手動輸入",
+          "請切回盤點分頁，直接輸入條碼後按查詢。"
+        );
       }
 
       document.getElementById("retry").onclick = function () {
