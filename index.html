@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="color-scheme" content="dark">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>UPC 快速掃描</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #000;
+      color: #fff;
+      font-family: "Microsoft JhengHei", "Noto Sans TC", sans-serif;
+      overflow: hidden;
+    }
+    #wrap {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      background: #000;
+    }
+    #video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      background: #000;
+    }
+    #mask {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background:
+        linear-gradient(#000a, #000a) top / 100% calc(50% - 70px) no-repeat,
+        linear-gradient(#000a, #000a) bottom / 100% calc(50% - 70px) no-repeat,
+        linear-gradient(#000a, #000a) left / calc(50% - 46vw) 140px no-repeat,
+        linear-gradient(#000a, #000a) right / calc(50% - 46vw) 140px no-repeat;
+    }
+    #frame {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: min(92vw, 420px);
+      height: 140px;
+      transform: translate(-50%, -50%);
+      border: 3px solid #0d6efd;
+      border-radius: 14px;
+      box-shadow: 0 0 0 9999px rgba(0,0,0,.55);
+      pointer-events: none;
+    }
+    #laser {
+      position: absolute;
+      left: 8%;
+      right: 8%;
+      top: 50%;
+      height: 2px;
+      background: #ff3b30;
+      box-shadow: 0 0 10px #ff3b30;
+      animation: laser 1.4s ease-in-out infinite;
+      pointer-events: none;
+    }
+    @keyframes laser {
+      0%, 100% { transform: translateY(-48px); opacity: .35; }
+      50% { transform: translateY(48px); opacity: 1; }
+    }
+    #hint {
+      position: absolute;
+      left: 12px;
+      right: 12px;
+      top: 12px;
+      z-index: 5;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: #0d6efd;
+      font-size: 1.05rem;
+      font-weight: 800;
+      text-align: center;
+      line-height: 1.35;
+    }
+    #hint.ok { background: #198754; }
+    #hint.err { background: #b02a37; }
+    #actions {
+      position: absolute;
+      left: 12px;
+      right: 12px;
+      bottom: 18px;
+      z-index: 5;
+      display: grid;
+      gap: 10px;
+    }
+    button {
+      width: 100%;
+      border: 0;
+      border-radius: 12px;
+      padding: 15px;
+      font-size: 1.05rem;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    #retry { background: #0d6efd; color: #fff; }
+    #torch { background: #343a40; color: #fff; display: none; }
+    #closeBtn { background: #6c757d; color: #fff; }
+    .sub {
+      text-align: center;
+      color: #ced4da;
+      font-size: .9rem;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <video id="video" playsinline muted autoplay></video>
+    <div id="mask"></div>
+    <div id="frame"><div id="laser"></div></div>
+    <div id="hint">正在載入掃碼引擎…</div>
+    <div id="actions">
+      <div class="sub">請將 UPC／EAN 條碼對準藍框（拉近、保持穩定）</div>
+      <button type="button" id="torch">手電筒</button>
+      <button type="button" id="retry">重新開啟相機</button>
+      <button type="button" id="closeBtn">關閉視窗</button>
+    </div>
+  </div>
+
+  <!-- ZBar WASM：iPhone 上通常比純 JS ZXing 更快、更穩 -->
+  <script src="https://cdn.jsdelivr.net/npm/@undecaf/zbar-wasm@0.9.16/dist/index.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@undecaf/barcode-detector-polyfill@0.9.23/dist/index.js"></script>
+  <script>
+    (function () {
+      var FORMATS = ["ean_13", "ean_8", "upc_a", "upc_e"];
+      var video = document.getElementById("video");
+      var hintEl = document.getElementById("hint");
+      var torchBtn = document.getElementById("torch");
+      var stream = null;
+      var track = null;
+      var detector = null;
+      var looping = false;
+      var done = false;
+      var torchOn = false;
+      var lastCode = "";
+      var lastAt = 0;
+
+      function hint(text, kind) {
+        hintEl.className = kind || "";
+        hintEl.textContent = text;
+      }
+
+      function sanitize(value) {
+        return String(value || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+      }
+
+      function postResult(code) {
+        var payload = {
+          type: "barcode-scanned",
+          value: code,
+          text: code,
+          __upcScan: code
+        };
+        try {
+          if (window.opener && !window.opener.closed) {
+            if (typeof window.opener.onExternalScanResult === "function") {
+              window.opener.onExternalScanResult(code);
+            }
+            window.opener.postMessage(payload, "*");
+          }
+        } catch (e) {}
+        try {
+          if (window.parent && window.parent !== window) {
+            window.parent.postMessage(payload, "*");
+          }
+        } catch (e2) {}
+      }
+
+      function beep() {
+        try {
+          var ctx = new (window.AudioContext || window.webkitAudioContext)();
+          var o = ctx.createOscillator();
+          var g = ctx.createGain();
+          o.type = "sine";
+          o.frequency.value = 880;
+          g.gain.value = 0.05;
+          o.connect(g);
+          g.connect(ctx.destination);
+          o.start();
+          setTimeout(function () {
+            o.stop();
+            ctx.close();
+          }, 120);
+        } catch (e) {}
+      }
+
+      function ensureDetector() {
+        try {
+          window.BarcodeDetector.getSupportedFormats();
+        } catch (e) {
+          window.BarcodeDetector = barcodeDetectorPolyfill.BarcodeDetectorPolyfill;
+        }
+        detector = new window.BarcodeDetector({ formats: FORMATS });
+      }
+
+      function stopCamera() {
+        looping = false;
+        if (stream) {
+          stream.getTracks().forEach(function (t) { t.stop(); });
+        }
+        stream = null;
+        track = null;
+        video.srcObject = null;
+      }
+
+      function onDetected(raw) {
+        if (done) return;
+        var code = sanitize(raw);
+        if (!code || code.length < 6) return;
+        var now = Date.now();
+        if (code === lastCode && now - lastAt < 1200) return;
+        lastCode = code;
+        lastAt = now;
+        done = true;
+        looping = false;
+        if (navigator.vibrate) {
+          try { navigator.vibrate(40); } catch (e) {}
+        }
+        beep();
+        hint("已掃到 " + code + "，返回盤點畫面…", "ok");
+        postResult(code);
+        stopCamera();
+        setTimeout(function () {
+          try { window.close(); } catch (e) {}
+        }, 280);
+      }
+
+      async function detectLoop() {
+        if (!looping || done) return;
+        try {
+          if (video.readyState >= 2 && video.videoWidth > 0) {
+            var barcodes = await detector.detect(video);
+            if (barcodes && barcodes.length) {
+              onDetected(barcodes[0].rawValue);
+              return;
+            }
+          }
+        } catch (e) {
+          // keep scanning
+        }
+        if (looping && !done) {
+          setTimeout(detectLoop, 90);
+        }
+      }
+
+      async function tryApplyZoomAndFocus() {
+        if (!track || typeof track.getCapabilities !== "function") return;
+        var caps = track.getCapabilities() || {};
+        var advanced = [];
+        if (caps.zoom) {
+          var zMin = caps.zoom.min || 1;
+          var zMax = caps.zoom.max || 1;
+          var zoom = Math.min(Math.max(zMin, 1.6), zMax);
+          advanced.push({ zoom: zoom });
+        }
+        if (caps.focusMode && caps.focusMode.indexOf("continuous") >= 0) {
+          advanced.push({ focusMode: "continuous" });
+        }
+        if (!advanced.length) return;
+        try {
+          await track.applyConstraints({ advanced: advanced });
+        } catch (e) {}
+      }
+
+      async function startCamera() {
+        done = false;
+        stopCamera();
+        hint("正在開啟相機…請允許相機權限");
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          hint("此瀏覽器不支援相機", "err");
+          return;
+        }
+        try {
+          ensureDetector();
+        } catch (e) {
+          hint("掃碼引擎載入失敗，請重新整理頁面", "err");
+          return;
+        }
+
+        var constraints = {
+          audio: false,
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 }
+          }
+        };
+
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (e1) {
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              audio: false,
+              video: { facingMode: "environment" }
+            });
+          } catch (e2) {
+            hint("無法開啟相機：" + ((e2 && e2.message) || e2), "err");
+            return;
+          }
+        }
+
+        video.srcObject = stream;
+        track = stream.getVideoTracks()[0] || null;
+        try { await video.play(); } catch (e) {}
+
+        // iPhone：相機啟動後再套用 zoom／對焦，辨識率會明顯提高
+        setTimeout(tryApplyZoomAndFocus, 700);
+
+        if (track && track.getCapabilities) {
+          var caps = track.getCapabilities() || {};
+          if ("torch" in caps || (caps.torch === true)) {
+            torchBtn.style.display = "block";
+          } else {
+            // some Android expose torch only via advanced
+            try {
+              var settings = track.getSettings ? track.getSettings() : {};
+              torchBtn.style.display = ("torch" in settings) ? "block" : "none";
+            } catch (e3) {
+              torchBtn.style.display = "none";
+            }
+          }
+        }
+
+        hint("將條碼對準藍框，辨識成功後自動回傳");
+        looping = true;
+        detectLoop();
+      }
+
+      async function toggleTorch() {
+        if (!track) return;
+        torchOn = !torchOn;
+        try {
+          await track.applyConstraints({ advanced: [{ torch: torchOn }] });
+          torchBtn.textContent = torchOn ? "關閉手電筒" : "手電筒";
+        } catch (e) {
+          torchOn = !torchOn;
+          hint("此裝置不支援手電筒", "err");
+        }
+      }
+
+      document.getElementById("retry").onclick = function () {
+        startCamera();
+      };
+      document.getElementById("closeBtn").onclick = function () {
+        stopCamera();
+        try { window.close(); } catch (e) {}
+      };
+      torchBtn.onclick = toggleTorch;
+
+      if (!window.barcodeDetectorPolyfill && !window.BarcodeDetector) {
+        hint("掃碼函式庫載入中，若持續失敗請檢查網路後重試", "err");
+      }
+      startCamera();
+    })();
+  </script>
+</body>
+</html>
