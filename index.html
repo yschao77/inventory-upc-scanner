@@ -103,12 +103,15 @@
     }
     #retry { background: #0d6efd; color: #fff; }
     #torch { background: #343a40; color: #fff; display: none; }
-    #closeBtn { background: #6c757d; color: #fff; }
     .sub {
       text-align: center;
       color: #ced4da;
       font-size: .9rem;
       font-weight: 600;
+    }
+    .sub strong {
+      color: #ffc107;
+      font-weight: 900;
     }
     #stay {
       position: absolute;
@@ -145,10 +148,9 @@
     <div id="frame"><div id="laser"></div></div>
     <div id="hint">正在載入掃碼引擎…</div>
     <div id="actions">
-      <div class="sub">請將 UPC／EAN 條碼對準藍框（拉近、保持穩定）</div>
+      <div class="sub">請將商品 UPC／EAN 對準藍框<br>若要手動輸入，請掃描「<strong>手動輸入</strong>」條碼</div>
       <button type="button" id="torch">手電筒</button>
       <button type="button" id="retry">重新開啟相機</button>
-      <button type="button" id="closeBtn">手動輸入條碼</button>
     </div>
     <div id="stay">
       <div id="stayTitle"></div>
@@ -161,7 +163,13 @@
   <script src="https://cdn.jsdelivr.net/npm/@undecaf/barcode-detector-polyfill@0.9.23/dist/index.js"></script>
   <script>
     (function () {
-      var FORMATS = ["ean_13", "ean_8", "upc_a", "upc_e"];
+      var FORMATS = ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39"];
+      // 專用「手動輸入」條碼內容（標籤可印中文，編碼建議用 MANUAL）
+      var MANUAL_CODES = {
+        MANUAL: true,
+        MANUALINPUT: true,
+        SHOUDONG: true
+      };
       var video = document.getElementById("video");
       var hintEl = document.getElementById("hint");
       var torchBtn = document.getElementById("torch");
@@ -184,6 +192,14 @@
 
       function sanitize(value) {
         return String(value || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+      }
+
+      function isManualBarcode(raw) {
+        var text = String(raw || "").trim();
+        if (!text) return false;
+        if (text.indexOf("手動輸入") >= 0) return true;
+        var cleaned = sanitize(text);
+        return !!(cleaned && MANUAL_CODES[cleaned]);
       }
 
       function isSafeCallback(url) {
@@ -334,6 +350,18 @@
 
       function onDetected(raw) {
         if (done) return;
+        if (isManualBarcode(raw)) {
+          var nowM = Date.now();
+          if (lastCode === "MANUAL" && nowM - lastAt < 1200) return;
+          lastCode = "MANUAL";
+          lastAt = nowM;
+          if (navigator.vibrate) {
+            try { navigator.vibrate(40); } catch (e) {}
+          }
+          beep();
+          requestManualInput();
+          return;
+        }
         var code = sanitize(raw);
         if (!code || code.length < 6) return;
         var now = Date.now();
@@ -447,7 +475,7 @@
           }
         }
 
-        hint("將條碼對準藍框，辨識成功後自動回傳");
+        hint("將商品條碼對準藍框；手動輸入請掃「手動輸入」條碼");
         looping = true;
         detectLoop();
       }
@@ -482,7 +510,6 @@
       document.getElementById("retry").onclick = function () {
         startCamera();
       };
-      document.getElementById("closeBtn").onclick = requestManualInput;
       torchBtn.onclick = toggleTorch;
 
       if (!window.barcodeDetectorPolyfill && !window.BarcodeDetector) {
