@@ -122,7 +122,7 @@
       <div class="sub">請將 UPC／EAN 條碼對準藍框（拉近、保持穩定）</div>
       <button type="button" id="torch">手電筒</button>
       <button type="button" id="retry">重新開啟相機</button>
-      <button type="button" id="closeBtn">關閉視窗</button>
+      <button type="button" id="closeBtn">手動輸入條碼</button>
     </div>
   </div>
 
@@ -365,13 +365,29 @@
         }
       }
 
+      function requestManualInput() {
+        // 通知盤點頁立刻切手動輸入（不依賴關閉後輪詢寬限）
+        var payload = { type: "manual-barcode-input", __upcManual: true };
+        try {
+          if (window.opener && !window.opener.closed) {
+            if (typeof window.opener.requestManualBarcodeInput === "function") {
+              window.opener.requestManualBarcodeInput();
+            }
+            window.opener.postMessage(payload, "*");
+            try { window.opener.focus(); } catch (e0) {}
+          }
+        } catch (e) {}
+        stopCamera();
+        hint("請返回盤點畫面手動輸入條碼…", "ok");
+        setTimeout(function () {
+          try { window.close(); } catch (e2) {}
+        }, 200);
+      }
+
       document.getElementById("retry").onclick = function () {
         startCamera();
       };
-      document.getElementById("closeBtn").onclick = function () {
-        stopCamera();
-        try { window.close(); } catch (e) {}
-      };
+      document.getElementById("closeBtn").onclick = requestManualInput;
       torchBtn.onclick = toggleTorch;
 
       if (!window.barcodeDetectorPolyfill && !window.BarcodeDetector) {
