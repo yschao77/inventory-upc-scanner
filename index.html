@@ -160,19 +160,24 @@
           text: code,
           __upcScan: code
         };
-        try {
-          if (window.opener && !window.opener.closed) {
-            if (typeof window.opener.onExternalScanResult === "function") {
-              window.opener.onExternalScanResult(code);
+        function sendOnce() {
+          try {
+            if (window.opener) {
+              if (typeof window.opener.onExternalScanResult === "function") {
+                window.opener.onExternalScanResult(code);
+              }
+              window.opener.postMessage(payload, "*");
             }
-            window.opener.postMessage(payload, "*");
-          }
-        } catch (e) {}
-        try {
-          if (window.parent && window.parent !== window) {
-            window.parent.postMessage(payload, "*");
-          }
-        } catch (e2) {}
+          } catch (e) {}
+          try {
+            if (window.parent && window.parent !== window) {
+              window.parent.postMessage(payload, "*");
+            }
+          } catch (e2) {}
+        }
+        // 連送兩次，避免 GAS 跨網域時偶發漏收
+        sendOnce();
+        setTimeout(sendOnce, 120);
       }
 
       function beep() {
@@ -229,9 +234,10 @@
         hint("已掃到 " + code + "，返回盤點畫面…", "ok");
         postResult(code);
         stopCamera();
+        // 稍晚關閉，讓 opener 有時間收到 postMessage
         setTimeout(function () {
           try { window.close(); } catch (e) {}
-        }, 280);
+        }, 700);
       }
 
       async function detectLoop() {
