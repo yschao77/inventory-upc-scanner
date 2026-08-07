@@ -197,6 +197,7 @@
 
       // 背景送出，不做頁面導向：導到 Google 網域後 opener 會被切斷，
       // 這個分頁就再也關不掉（使用者會卡在中繼頁）。
+      // 回傳 Promise：必須等送出完成（或逾時）後才能關窗，否則 iOS 會砍掉進行中的請求。
       function sendToCallback(action, extraKey, extraValue) {
         var url = callbackUrl +
           (callbackUrl.indexOf("?") >= 0 ? "&" : "?") +
@@ -204,22 +205,30 @@
           "&token=" + encodeURIComponent(scanToken);
         if (extraKey) url += "&" + extraKey + "=" + encodeURIComponent(extraValue);
         url += "&t=" + Date.now();
-        try {
-          if (window.fetch) {
-            fetch(url, {
-              mode: "no-cors",
-              cache: "no-store",
-              credentials: "omit",
-              keepalive: true
-            }).catch(function () {});
-          }
-        } catch (e) {}
-        // 影像請求作為備援：同一 token 重複寫入結果相同
+
+        // 影像請求作為備援（與 fetch 並行）
         try {
           var img = new Image();
           img.referrerPolicy = "no-referrer";
           img.src = url + "&r=img";
         } catch (e2) {}
+
+        if (!window.fetch) {
+          return new Promise(function (resolve) { setTimeout(resolve, 1200); });
+        }
+
+        var fetchDone = fetch(url, {
+          mode: "no-cors",
+          cache: "no-store",
+          credentials: "omit",
+          keepalive: true
+        }).then(function () {}).catch(function () {});
+
+        // no-cors 無法讀結果；等請求結束或最多 2.5 秒，確保 GAS 有機會寫入 Cache
+        return Promise.race([
+          fetchDone,
+          new Promise(function (resolve) { setTimeout(resolve, 2500); })
+        ]);
       }
 
       function postToOpener(payload) {
@@ -227,9 +236,12 @@
         try {
           if (window.opener) window.opener.postMessage(payload, "*");
         } catch (e) {}
+      }
+
+      function focusOpener() {
         try {
           if (window.opener) window.opener.focus();
-        } catch (e2) {}
+        } catch (e) {}
       }
 
       function showStay(title, text) {
@@ -238,12 +250,12 @@
         document.getElementById("stay").className = "show";
       }
 
-      // 送出後自我關閉；iOS 有時不允許關閉，此時整頁顯示提示，
-      // 盤點分頁已由輪詢處理完畢，使用者切回去即可繼續。
+      // 先嘗試把焦點交回盤點頁再關閉；若 iOS 擋關閉，才顯示「請切回」備援。
       function closeSelfOrNotify(title, text) {
+        focusOpener();
         setTimeout(function () {
           try { window.close(); } catch (e) {}
-        }, 250);
+        }, 120);
         setTimeout(function () {
           showStay(title, text);
         }, 900);
@@ -252,17 +264,22 @@
       function deliverResult(code) {
         stopCamera();
         hint("已掃到 " + code + "，正在回傳盤點系統…", "ok");
-        if (hasCallback()) sendToCallback("scanResult", "code", code);
-        postToOpener({
-          type: "barcode-scanned",
-          value: code,
-          text: code,
-          __upcScan: code
+        var wait = hasCallback()
+          ? sendToCallback("scanResult", "code", code)
+          : Promise.resolve();
+        wait.then(function () {
+          // 必須等 callback 寫入後再通知／關窗，避免請求被中斷
+          postToOpener({
+            type: "barcode-scanned",
+            value: code,
+            text: code,
+            __upcScan: code
+          });
+          closeSelfOrNotify(
+            "✓ 已掃到 " + code,
+            "已回傳盤點系統。請切回盤點分頁，系統會自動查詢。"
+          );
         });
-        closeSelfOrNotify(
-          "✓ 已掃到 " + code,
-          "已回傳盤點系統。請切回盤點分頁，系統會自動查詢。"
-        );
       }
 
       function beep() {
@@ -440,12 +457,17 @@
         looping = false;
         stopCamera();
         hint("正在切換手動輸入…", "ok");
-        if (hasCallback()) sendToCallback("scanCancel");
-        postToOpener({ type: "manual-barcode-input", __upcManual: true });
-        closeSelfOrNotify(
-          "✓ 已切換手動輸入",
-          "請切回盤點分頁，直接輸入條碼後按查詢。"
-        );
+        var wait = hasCallback()
+          ? sendToCallback("scanCancel")
+          : Promise.resolve();
+        wait.then(function () {
+          // 等 cancelled 寫入後再通知盤點頁，避免父頁提早關窗中斷請求
+          postToOpener({ type: "manual-barcode-input", __upcManual: true });
+          closeSelfOrNotify(
+            "✓ 已切換手動輸入",
+            "請切回盤點分頁，直接輸入條碼後按查詢。"
+          );
+        });
       }
 
       document.getElementById("retry").onclick = function () {
